@@ -1,0 +1,3 @@
+[submodule "union-docs-common"]
+	path = union-docs-common
+	url = https://github.com/rpi-student-government/union-docs-common
