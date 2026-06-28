@@ -1,0 +1,127 @@
+name: Compile LaTeX to PDF
+
+permissions:
+  contents: write
+
+on:
+  push:
+    paths:
+      - '*.tex'
+      - 'uniondoc.cls'
+      - '.latexmkrc'
+      - '.gitignore'
+      - '.gitmodules'
+      - 'union-docs-common'
+      - 'union-docs-common/**'
+      - '.github/workflows/compile-latex.yml'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      has_roots: ${{ steps.discover.outputs.has_roots }}
+      root_files: ${{ steps.discover.outputs.root_files }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Discover top-level TeX roots
+        id: discover
+        shell: bash
+        run: |
+          mapfile -t roots < <(find . -maxdepth 1 -type f -name '*.tex' -print | sort)
+
+          if [ "${#roots[@]}" -eq 0 ]; then
+            echo "has_roots=false" >> "$GITHUB_OUTPUT"
+            {
+              echo 'root_files<<EOF'
+              echo
+              echo 'EOF'
+            } >> "$GITHUB_OUTPUT"
+            echo "No top-level .tex files found; skipping compile steps."
+            exit 0
+          fi
+
+          echo "has_roots=true" >> "$GITHUB_OUTPUT"
+          {
+            echo 'root_files<<EOF'
+            printf '%s\n' "${roots[@]#./}"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+          printf 'Discovered TeX roots:\n%s\n' "${roots[@]#./}"
+
+  build:
+    needs: discover
+    if: needs.discover.outputs.has_roots == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Compile top-level TeX roots
+        uses: xu-cheng/latex-action@v3
+        with:
+          root_file: ${{ needs.discover.outputs.root_files }}
+          latexmk_use_lualatex: true
+          latexmk_shell_escape: true
+          args: -file-line-error -halt-on-error -interaction=nonstopmode
+          post_compile: |
+            find . -maxdepth 1 -type f \( -name '*.aux' -o -name '*.log' -o -name '*.out' -o -name '*.toc' -o -name '*.fdb_latexmk' -o -name '*.fls' -o -name '*.synctex.gz' \) -delete
+
+      - name: Copy PDFs to project root
+        shell: bash
+        run: |
+          shopt -s nullglob
+          for pdf in build/*.pdf; do
+            cp "$pdf" "$(basename "$pdf")"
+          done
+
+      - name: List generated files
+        run: find . -maxdepth 1 -type f -name '*.pdf' | sort
+
+      - name: Commit generated PDFs
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          shopt -s nullglob
+          pdfs=( *.pdf )
+          if [ "${#pdfs[@]}" -eq 0 ]; then
+            echo "No generated PDFs to commit"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f -- "${pdfs[@]}"
+          if git diff --cached --quiet; then
+            echo "No PDF changes to commit"
+            exit 0
+          fi
+          git commit -m "[Bot] Update generated PDFs"
+          git push origin "${GITHUB_REF_NAME}"
+
+      - name: Upload generated PDFs
+        uses: actions/upload-artifact@v6
+        with:
+          name: compiled-pdfs
+          path: '*.pdf'
+          if-no-files-found: error
+          retention-days: 30
+
+  nothing-to-build:
+    needs: discover
+    if: needs.discover.outputs.has_roots != 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Skip compile
+        run: echo "No top-level .tex roots found; nothing to compile."
